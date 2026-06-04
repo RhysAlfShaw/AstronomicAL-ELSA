@@ -5,10 +5,6 @@
 [![Documentation Status](https://readthedocs.org/projects/astronomical/badge/?version=latest)](https://astronomical.readthedocs.io/en/latest/?badge=latest)
 [![DOI](https://joss.theoj.org/papers/10.21105/joss.03635/status.svg)](https://doi.org/10.21105/joss.03635)
 
-> [!WARNING]
-> This branch is under active development and the codebase is changing frequently. Some parts of the platform are still incomplete, unstable, or not yet fully functional.
-
-
 AstronomicAL is a local, human-in-the-loop analysis platform for working with tabular scientific datasets.
 
 It helps researchers inspect records, combine contextual information, curate reliable labels, create review workflows, and build machine-learning workflows such as active learning. AstronomicAL was originally developed and validated in astronomy, but the platform is being redesigned so that astronomy is one optional domain bundle rather than the built-in identity of the whole application.
