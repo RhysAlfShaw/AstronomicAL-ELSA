@@ -9,7 +9,7 @@ AstronomicAL is a local, human-in-the-loop analysis platform for working with ta
 
 It helps researchers inspect records, combine contextual information, curate reliable labels, create review workflows, and build machine-learning workflows such as active learning. AstronomicAL was originally developed and validated in astronomy, but the platform is being redesigned so that astronomy is one optional domain bundle rather than the built-in identity of the whole application.
 
-The long-term goal is:
+The structure is:
 
 ```text
 small generic platform
@@ -154,6 +154,88 @@ Config is only a temporary compatibility bridge.
 ```
 
 This structure is intended to make the core smaller, more maintainable, and less domain-specific.
+
+---
+## Documentation
+
+The main documentation is available at:
+
+```text
+https://astronomical.readthedocs.io
+```
+
+Plugin-system documentation is being expanded as the platform stabilises.
+
+Important project documents include:
+
+```text
+PLUGIN_README.md
+PLUGIN_CONTRACT.md
+docs/source/
+```
+
+`PLUGIN_README.md` explains how to write plugins.
+
+`PLUGIN_CONTRACT.md`, when present, defines the supported baseline for plugin authors and contributors.
+
+---
+
+## Developing plugins
+
+A minimal plugin lives in its own folder and exposes a `plugin.py` file.
+
+```text
+astronomicAL/plugins/example_plugin/
+└── plugin.py
+```
+
+A plugin should expose:
+
+1. a module-level `manifest`
+2. a `register(api)` function
+
+Example:
+
+```python
+from astronomicAL.platform.plugins import PluginManifest
+
+manifest = PluginManifest(
+    id="example.hello",
+    name="Hello Plugin",
+    version="0.1.0",
+    description="A minimal example plugin.",
+    capabilities=["panel"],
+    tags=["example"],
+)
+
+
+def register(api):
+    api.register_panel(
+        id="panel",
+        title="Hello Panel",
+        factory=create_panel,
+        description="A minimal plugin panel.",
+        category="Examples",
+    )
+
+
+def create_panel(context, **kwargs):
+    import panel as pn
+
+    view = pn.pane.Markdown("## Hello from a plugin")
+    controller = None
+    return view, controller
+```
+
+The registered panel id becomes:
+
+```text
+example.hello.panel
+```
+
+Plugin registration ids are automatically namespaced by the plugin id.
+
+For a full guide, see: [PLUGIN_README.md](PLUGIN_README.md)
 
 ---
 
@@ -438,93 +520,6 @@ Useful diagnostic plugins include:
 ```text
 core.event_monitor
 core.plugin_manager
-```
-
----
-
-## Documentation
-
-The main documentation is available at:
-
-```text
-https://astronomical.readthedocs.io
-```
-
-Plugin-system documentation is being expanded as the platform stabilises.
-
-Important project documents include:
-
-```text
-PLUGIN_README.md
-PLUGIN_CONTRACT.md
-docs/source/
-```
-
-`PLUGIN_README.md` explains how to write plugins.
-
-`PLUGIN_CONTRACT.md`, when present, defines the supported baseline for plugin authors and contributors.
-
----
-
-## Developing plugins
-
-A minimal plugin lives in its own folder and exposes a `plugin.py` file.
-
-```text
-astronomicAL/plugins/example_plugin/
-└── plugin.py
-```
-
-A plugin should expose:
-
-1. a module-level `manifest`
-2. a `register(api)` function
-
-Example:
-
-```python
-from astronomicAL.platform.plugins import PluginManifest
-
-manifest = PluginManifest(
-    id="example.hello",
-    name="Hello Plugin",
-    version="0.1.0",
-    description="A minimal example plugin.",
-    capabilities=["panel"],
-    tags=["example"],
-)
-
-
-def register(api):
-    api.register_panel(
-        id="panel",
-        title="Hello Panel",
-        factory=create_panel,
-        description="A minimal plugin panel.",
-        category="Examples",
-    )
-
-
-def create_panel(context, **kwargs):
-    import panel as pn
-
-    view = pn.pane.Markdown("## Hello from a plugin")
-    controller = None
-    return view, controller
-```
-
-The registered panel id becomes:
-
-```text
-example.hello.panel
-```
-
-Plugin registration ids are automatically namespaced by the plugin id.
-
-For a full guide, see:
-
-```text
-PLUGIN_README.md
 ```
 
 ---
