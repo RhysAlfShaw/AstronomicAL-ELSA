@@ -1,4 +1,5 @@
 from datetime import datetime
+import uuid
 from holoviews.operation.datashader import (
     datashade,
     dynspread,
@@ -6,58 +7,186 @@ from holoviews.operation.datashader import (
 
 import datashader as ds
 import holoviews as hv
+from holoviews import opts
 
-import astronomicAL.config as config
 import numpy as np
 import pandas as pd
 import panel as pn
 import glob
 import json
 import os
-import param
+
+
+import uuid
+from dataclasses import dataclass
+from typing import Any, Callable, List
+
+try:
+    from astronomicAL.platform.events import Subscription
+except Exception:  # pragma: no cover
+    Subscription = Any  # type: ignore
+
+
+@dataclass
+class _ManagedJob:
+    key: str
+    handle: Any  # JobHandle from JobManager
+
 
 
 def get_plot_dict():
 
+
     plot_dict = {
-        "Mateos 2012 Wedge": CustomPlot(
-            mateos_2012_wedge, ["Log10(W3_Flux/W2_Flux)", "Log10(W2_Flux/W1_Flux)"]
-        ),
-        "BPT Plots": CustomPlot(
+        #"Debug publish" : CustomPlot(debug_plot_publisher, []),
+
+        #"Debug subscribe" : CustomPlot(debug_plot_subscriber, []),
+
+        #"Euclid Cutout" : CustomPlot(euclid_cutout_plot, []),
+       
+        #"DESI Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="DESI", from_sourceId=False),
+
+        #"DESI Spectrum from ID" : CustomPlot(spectrum_plot, ["DESI_TargetID"], dataset="DESI", from_sourceId=True),
+
+        #"Euclid Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="EuclidSpec", from_sourceId=False),
+
+        #"Euclid Spectrum from ID" : CustomPlot(spectrum_plot, ["Euclid_TargetID"], dataset="EuclidSpec", from_sourceId=True),
+
+        #"SDSS Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="SDSS", from_sourceId=False),
+
+        #"SDSS Spectrum from ID" : CustomPlot(spectrum_plot, ["SDSS_TargetID"], dataset="SDSS", from_sourceId=True),
+
+        #"Mateos 2012 Wedge": CustomPlot(
+        #    mateos_2012_wedge, ["Log10(W3_Flux/W2_Flux)", "Log10(W2_Flux/W1_Flux)"]
+        #),
+        "BPT Plots" : lambda context : CustomPlot(
             bpt_plot,
             [
                 "Log10(NII_6584_FLUX/H_ALPHA_FLUX)",
                 "Log10(SII_6717_FLUX/H_ALPHA_FLUX)",
                 "Log10(OI_6300_FLUX/H_ALPHA_FLUX)",
                 "Log10(OIII_5007_FLUX/H_BETA_FLUX)",
-            ],
+            ], context = context,
         ),
-        "SED Plot": SEDPlot(sed_plot, []),
+        #"SED Plot": SEDPlot(sed_plot, []),
+
+        #"VLA-VLASS Cutout" : CustomPlot(vlass_cutout_plot, []),
+
+        #"LOFAR-LoTSS Cutout" : CustomPlot(lotss_cutout_plot, []),
+
+
+
+        "Stored Image"  : lambda context : CustomPlot(
+            local_stored_plot, 
+            ["Local_image_path"], 
+            context=context)
     }
 
     return plot_dict
 
 
 class CustomPlot:
-    def __init__(self, plot_fn, extra_features):
+    def __init__(self, plot_fn, extra_features, context, **plot_fn_kwargs):
+
+        self.context = context
+
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
+
+        # Lifecycle tracking
+        self._subscriptions: List[Subscription] = []
+        self._jobs: List[_ManagedJob] = []
+        self._bokeh_on_change: list[tuple[Any, str, Callable]] = []
+
+        self._disposed = False
+        self._event_subs = []
+        self._periodic_cbs = []
 
         self.plot_fn = plot_fn
         self.extra_features = extra_features
         self.row = pn.Row("Loading...")
+        self.plot_fn_kwargs = plot_fn_kwargs
+        self.panel_id = str(uuid.uuid4()) 
 
+    def watch_bokeh(self, model, attr: str, callback):
+        """Register and track Bokeh model.on_change callbacks for unified disposal."""
+        if model is None:
+            return
+        try:
+            model.on_change(attr, callback)
+            self._bokeh_on_change.append((model, attr, callback))
+        except Exception:
+            pass
+
+    def unwatch_all_bokeh(self):
+        """Remove all tracked Bokeh callbacks (idempotent)."""
+        for model, attr, callback in list(getattr(self, "_bokeh_on_change", [])):
+            try:
+                model.remove_on_change(attr, callback)
+            except Exception as e:
+                # Ignore double-remove noise
+                if "list.remove(x): x not in list" in str(e):
+                    pass
+            # continue regardless
+        self._bokeh_on_change = []
+
+    def _dispose_impl(self):
+        """Subclass-specific cleanup hook (override if needed)."""
+        return
+
+    def dispose(self):
+        if getattr(self, "_disposed", False):
+            return
+        self._disposed = True
+        print(f"[dispose] CustomPlot panel_id={self.panel_id} plot_fn={getattr(self.plot_fn, '__name__', str(self.plot_fn))}")
+        # 1) subclass cleanup first
+        try:
+            self._dispose_impl()
+        except Exception:
+            pass
+
+        # remove any temp config keys set during unknown column selection
+        try:
+            self.remove_column_selection()
+        except Exception:
+            pass
+
+        # 2) unwatch bokeh callbacks (including src.on_change if registered via watch_bokeh)
+        try:
+            self.unwatch_all_bokeh()
+        except Exception:
+            pass
+
+        # 3) Unsubscribe EventBus
+        if self.context and getattr(self.context, "events", None):
+            for sub in list(getattr(self, "_event_subs", [])):
+                try:
+                    self.context.events.unsubscribe(sub)
+                except Exception:
+                    pass
+        self._event_subs = []
+
+        # 4) Stop periodic callbacks
+        for cb in list(getattr(self, "_periodic_cbs", [])):
+            try:
+                cb.stop()
+            except Exception:
+                pass
+        self._periodic_cbs = []
+    
     def create_settings(self, unknown_cols):
         self.waiting = True
+        main_columns = list(self.config.main_df.columns)
         settings_column = pn.Column()
         for i, col in enumerate(unknown_cols):
 
             if i % 3 == 0:
                 settings_row = pn.Row()
-
-            settings_row.append(
-                pn.widgets.Select(
-                    name=col, options=list(config.main_df.columns), max_height=120
-                )
-            )
+            
+            options = main_columns
+            select_widget = pn.widgets.Select(name=col, options=options, max_height=120)
+            settings_row.append(select_widget)
+           
 
             if (i % 3 == 2) or (i == len(unknown_cols) - 1):
                 settings_column.append(settings_row)
@@ -76,21 +205,37 @@ class CustomPlot:
     def plot(self, submit_button):
         self.submit_button = submit_button
 
-        current_cols = config.main_df.columns
+        current_cols = self.config.main_df.columns
+        self.unknown_cols = []
 
-        unknown_cols = []
         for col in self.extra_features:
-            if col not in list(config.settings.keys()):
+            if col not in list(self.config.settings.keys()):
                 if col not in current_cols:
-                    unknown_cols.append(col)
+                    self.unknown_cols.append(col)
                 else:
-                    config.settings[col] = col
-        if len(unknown_cols) > 0:
-            self.col_selection = self.create_settings(unknown_cols)
+                    self.config.settings[col] = col
+
+        if len(self.unknown_cols) > 0:
+            self.col_selection = self.create_settings(self.unknown_cols)
             return self.render
         else:
-            return self.plot_fn
+            def plot_with_instance(*args, **kwargs):
+                view = self.plot_fn(context=self.context, *args, plot_instance=self, **kwargs, **self.plot_fn_kwargs)
+                # put the view inside our controller-owned container
+                self.row[0] = view
+                return self.row
+            return plot_with_instance
 
+    def remove_column_selection(self):
+        if hasattr(self, "unknown_cols"):
+            for col in self.unknown_cols:
+                if col in self.config.settings:
+                    del self.config.settings[col]
+            print(f"[{self.panel_id}] unknown columns selected removed from config")
+
+    def panel(self):
+        return self.row
+    
 
 def create_plot(
     data,
@@ -105,9 +250,13 @@ def create_plot(
     smaller_axes_limits=False,
     bounds=None,
     legend_position=None,
+    context = None
 ):
     assert x in list(data.columns), f"Column {x} is not a column in your dataframe."
     assert y in list(data.columns), f"Column {y} is not a column in your dataframe."
+
+    if (context is not None and getattr(context, "config", None) is not None):
+        config = context.config
 
     if bounds is not None:
         data = data[data[x] >= bounds[0]]
@@ -153,14 +302,14 @@ def create_plot(
     if colours:
         color_key = config.settings["label_colours"]
 
-        color_points = hv.NdOverlay(
-            {
-                config.settings["labels_to_strings"][f"{n}"]: hv.Points(
-                    [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
-                ).opts(style=dict(color=color_key[n], size=0))
-                for n in color_key
-            }
-        )
+        # color_points = hv.NdOverlay(
+        #     {
+        #         config.settings["labels_to_strings"][f"{n}"]: hv.Points(
+        #             [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
+        #         ).opts(style=dict(color=color_key[n], size=0))
+        #         for n in color_key
+        #     }
+        # )
 
     if smaller_axes_limits:
 
@@ -192,12 +341,19 @@ def create_plot(
                     min_y = np.min([min_y, np.min(selected[y])])
 
     if colours:
+
+        label_col = (context.config.settings.get("label_col") if hasattr(context, "config") else config.settings.get("label_col"))
+        has_label = bool(label_col) and (label_col in data.columns)
+
+        agg = ds.by(label_col, ds.count()) if has_label else ds.count()
+
+
         if smaller_axes_limits:
             plot = dynspread(
                 datashade(
                     p,
                     color_key=color_key,
-                    aggregator=ds.by(config.settings["label_col"], ds.count()),
+                    aggregator=agg,
                 ).opts(xlim=(min_x, max_x), ylim=(min_y, max_y), responsive=True),
                 threshold=0.75,
                 how="saturate",
@@ -207,7 +363,7 @@ def create_plot(
                 datashade(
                     p,
                     color_key=color_key,
-                    aggregator=ds.by(config.settings["label_col"], ds.count()),
+                    aggregator=agg,
                 ).opts(responsive=True),
                 threshold=0.75,
                 how="saturate",
@@ -238,7 +394,7 @@ def create_plot(
         plot = plot * selected_plot
 
     if legend and colours:
-        plot = plot * color_points
+        plot = plot #* color_points
 
     if legend_position is not None:
         plot = plot.opts(legend_position=legend_position)
@@ -246,7 +402,9 @@ def create_plot(
     return plot
 
 
-def bpt_plot(data, selected=None):
+def bpt_plot(data, selected=None, plot_instance=None, context = None):
+
+    config = context.config
 
     plot_NII = create_plot(
         data,
@@ -257,6 +415,7 @@ def bpt_plot(data, selected=None):
         selected=selected,
         bounds=[-1.8, 1.25, 1, -2.2],
         legend_position="bottom_right",
+        context=context
     )
 
     x1 = np.linspace(-1.6, -0.2, 60)
@@ -267,9 +426,9 @@ def bpt_plot(data, selected=None):
     l1 = pd.DataFrame(np.array([x1, y1]).T, columns=["x", "y"])
     l2 = pd.DataFrame(np.array([x2, y2]).T, columns=["x", "y"])
 
-    NII_line1 = create_plot(l1, "x", "y", plot_type="line", legend=False, colours=False)
+    NII_line1 = create_plot(l1, "x", "y", plot_type="line", legend=False, colours=False, context=context)
 
-    NII_line2 = create_plot(l2, "x", "y", plot_type="line", legend=False, colours=False)
+    NII_line2 = create_plot(l2, "x", "y", plot_type="line", legend=False, colours=False, context=context)
 
     plot_NII = plot_NII * NII_line1 * NII_line2
 
@@ -282,6 +441,7 @@ def bpt_plot(data, selected=None):
         selected=selected,
         bounds=[-2.1, 1.2, 0.9, -2.1],
         legend_position="bottom_right",
+        context=context
     )
 
     x1 = np.linspace(-2, 0.1, 60)
@@ -289,7 +449,7 @@ def bpt_plot(data, selected=None):
 
     l1 = pd.DataFrame(np.array([x1, y1]).T, columns=["x", "y"])
 
-    SII_line1 = create_plot(l1, "x", "y", plot_type="line", legend=False, colours=False)
+    SII_line1 = create_plot(l1, "x", "y", plot_type="line", legend=False, colours=False, context=context)
 
     plot_SII = plot_SII * SII_line1
 
@@ -302,6 +462,7 @@ def bpt_plot(data, selected=None):
         selected=selected,
         bounds=[-3.3, 1.25, 1.65, -2.3],
         legend_position="bottom_right",
+        context=context
     )
 
     x1 = np.linspace(-3, -0.8, 60)
@@ -309,7 +470,7 @@ def bpt_plot(data, selected=None):
 
     l1 = pd.DataFrame(np.array([x1, y1]).T, columns=["x", "y"])
 
-    OI_line1 = create_plot(l1, "x", "y", plot_type="line", legend=False, colours=False)
+    OI_line1 = create_plot(l1, "x", "y", plot_type="line", legend=False, colours=False, context=context)
 
     plot_OI = plot_OI * OI_line1
 
@@ -318,11 +479,13 @@ def bpt_plot(data, selected=None):
         ("SII", plot_SII.opts(legend_position="bottom_right", shared_axes=False)),
         ("OI", plot_OI.opts(legend_position="bottom_right", shared_axes=False)),
     )
-
     return tabs
 
 
-def mateos_2012_wedge(data, selected=None):
+def mateos_2012_wedge(data, selected=None, plot_instance=None, context=None):
+
+    if (context is not None and getattr(context, "config", None) is not None):
+        config = context.config
 
     plot = create_plot(
         data,
@@ -332,6 +495,7 @@ def mateos_2012_wedge(data, selected=None):
         legend=True,
         selected=selected,
         legend_position="bottom_right",
+        context = context
     )
 
     x = data[config.settings["Log10(W3_Flux/W2_Flux)"]]
@@ -368,9 +532,9 @@ def mateos_2012_wedge(data, selected=None):
         np.array([threshold_x, threshold_y]).transpose(), columns=["x", "y"]
     )
 
-    p1 = create_plot(top, "x", "y", plot_type="line", legend=False, colours=False)
-    p2 = create_plot(bottom, "x", "y", plot_type="line", legend=False, colours=False)
-    p3 = create_plot(threshold, "x", "y", plot_type="line", legend=False, colours=False)
+    p1 = create_plot(top, "x", "y", plot_type="line", legend=False, colours=False, context = context)
+    p2 = create_plot(bottom, "x", "y", plot_type="line", legend=False, colours=False, context = context)
+    p3 = create_plot(threshold, "x", "y", plot_type="line", legend=False, colours=False, context = context)
 
     plot = plot * p1 * p2 * p3
 
@@ -380,7 +544,11 @@ def mateos_2012_wedge(data, selected=None):
 
 
 class SEDPlot(CustomPlot):
-    def __init__(self, plot_fn, extra_features):
+    def __init__(self, plot_fn, extra_features, context = None):
+
+        self.context = context
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
 
         self.plot_fn = plot_fn
         self.extra_features = extra_features
@@ -397,7 +565,7 @@ class SEDPlot(CustomPlot):
 
             settings_row.append(
                 pn.widgets.Select(
-                    name=col, options=list(config.main_df.columns), max_height=120
+                    name=col, options=list(self.config.main_df.columns), max_height=120
                 )
             )
 
@@ -413,7 +581,7 @@ class SEDPlot(CustomPlot):
 
         bands_dict = {}
 
-        for col in list(config.main_df.columns):
+        for col in list(self.config.main_df.columns):
             bands_dict[col] = {"wavelength": -99, "FWHM": 0, "error": 0}
 
         if not os.path.isdir("data/sed_data"):
@@ -439,29 +607,29 @@ class SEDPlot(CustomPlot):
     def _get_unknown_features(self):
 
         unknown_cols = []
-        df_columns = list(config.main_df.columns)
+        df_columns = list(self.config.main_df.columns)
 
-        with open(config.settings["sed_file"], "r") as fp:
+        with open(self.config.settings["sed_file"], "r") as fp:
             bands = json.load(fp)
 
         for i in bands:
             if bands[i]["wavelength"] != -99:
                 if i not in df_columns:
-                    if i not in list(config.settings.keys()):
+                    if i not in list(self.config.settings.keys()):
                         unknown_cols.append(i)
-                    elif config.settings[i] not in df_columns:
+                    elif self.config.settings[i] not in df_columns:
                         unknown_cols.append(i)
             if type(bands[i]["wavelength"]) == str:
-                if bands[i]["wavelength"] not in config.main_df.columns:
-                    if bands[i]["wavelength"] not in config.settings.keys():
+                if bands[i]["wavelength"] not in self.config.main_df.columns:
+                    if bands[i]["wavelength"] not in self.config.settings.keys():
                         unknown_cols.append(bands[i]["wavelength"])
             if type(bands[i]["FWHM"]) == str:
-                if bands[i]["FWHM"] not in config.main_df.columns:
-                    if bands[i]["FWHM"] not in config.settings.keys():
+                if bands[i]["FWHM"] not in self.config.main_df.columns:
+                    if bands[i]["FWHM"] not in self.config.settings.keys():
                         unknown_cols.append(bands[i]["FWHM"])
             if type(bands[i]["error"]) == str:
-                if bands[i]["error"] not in config.main_df.columns:
-                    if bands[i]["error"] not in config.settings.keys():
+                if bands[i]["error"] not in self.config.main_df.columns:
+                    if bands[i]["error"] not in self.config.settings.keys():
                         unknown_cols.append(bands[i]["error"])
 
                 else:
@@ -479,9 +647,9 @@ class SEDPlot(CustomPlot):
         selected = self.files_selection.value
 
         if selected != "":
-            config.settings["sed_file"] = selected
+            self.config.settings["sed_file"] = selected
         else:
-            config.settings["sed_file"] = None
+            self.config.settings["sed_file"] = None
 
     def _load_file_menu(self, data, selected=None):
 
@@ -505,18 +673,18 @@ class SEDPlot(CustomPlot):
         if self.submit_button.disabled:
             pass
 
-        elif "sed_file" not in config.settings.keys():
+        elif "sed_file" not in self.config.settings.keys():
             return self._load_file_menu
 
-        elif config.settings["sed_file"] is None:
+        elif self.config.settings["sed_file"] is None:
             return self._load_file_menu
 
-        elif not os.path.isfile(config.settings["sed_file"]):
+        elif not os.path.isfile(self.config.settings["sed_file"]):
             print("Wrong file")
-            config.settings["sed_file"] = None
+            self.config.settings["sed_file"] = None
             return self._load_file_menu
 
-        with open(config.settings["sed_file"], "r") as fp:
+        with open(self.config.settings["sed_file"], "r") as fp:
             self.extra_columns = json.load(fp)
 
         unknown_cols = self._get_unknown_features()
@@ -528,8 +696,11 @@ class SEDPlot(CustomPlot):
             return self.plot_fn
 
 
-def sed_plot(data, selected=None):
+def sed_plot(data, selected=None, context=None):
 
+    if (context is not None and getattr(context, "config", None) is not None):
+        config = context.config
+    
     df_columns = list(config.main_df.columns)
 
     with open(config.settings["sed_file"], "r") as fp:
@@ -609,6 +780,7 @@ def sed_plot(data, selected=None):
             legend=False,
             show_selected=False,
             slow_render=True,
+            context = context
         )
         points = hv.Scatter(new_data, kdims=["wavelength (µm)"],).opts(
             fill_color="black",
@@ -648,3 +820,31 @@ def sed_plot(data, selected=None):
         )
 
     return plot
+
+
+################## Ivano
+
+def get_selected_source(data, selected):
+        if selected is None:
+            return None
+        cols = list(data.columns)
+        if not len(selected.data[cols[0]]) == 1:
+            return None 
+        return pd.DataFrame(selected.data, columns=cols, index=[0])
+
+def check_required_column(df, column):
+    return column in list(df.columns)
+
+
+def empty_panel(message = "Loading error"):
+    return pn.pane.Markdown(message)
+
+
+def local_stored_plot(data, selected, plot_instance=None, context = None):
+    selected_source = get_selected_source(data=data, selected = selected)
+    path = int(selected_source[context.config.settings["Local_image_path"]].iloc[0])
+    try:
+        return pn.pane.Image(path, width = 500)
+    except Exception as e:
+        print(e)
+        return empty_panel()

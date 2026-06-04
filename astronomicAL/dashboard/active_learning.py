@@ -1,6 +1,5 @@
 from astronomicAL.active_learning.active_learning import ActiveLearningModel
 
-import astronomicAL.config as config
 import panel as pn
 
 
@@ -23,9 +22,14 @@ class ActiveLearningDashboard:
 
     """
 
-    def __init__(self, src, df):
+    def __init__(self, src, df, context = None):
 
-        self.df = df
+        self.context = context
+
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
+
+        self.df = self.config.main_df
         self.src = src
         self.row = pn.Row(pn.pane.Str("loading"))
         self.active_learning = []
@@ -41,16 +45,21 @@ class ActiveLearningDashboard:
 
         """
         # CHANGED :: Add to AL settings
-        for label in config.settings["labels_to_train"]:
-            raw_label = config.settings["strings_to_labels"][label]
+        for label in self.config.settings["labels_to_train"]:
+            raw_label = self.config.settings["strings_to_labels"][label]
+            print("AL Dashboard:", label, raw_label)
             self.active_learning.append(
-                ActiveLearningModel(df=self.df, src=self.src, label=label)
+                ActiveLearningModel(df=self.df, src=self.src, label=label, context=self.context)
             )
         self.al_tabs = pn.Tabs(dynamic=True)
         for i, al_tab in enumerate(self.active_learning):
             self.al_tabs.append((al_tab._label_alias, al_tab.panel()))
 
         self.panel()
+
+    def get_toolbar(self):
+        return pn.Spacer(height=1)
+
 
     def panel(self):
         """Render the current view.
@@ -62,5 +71,6 @@ class ActiveLearningDashboard:
             parent Dashboard.
 
         """
-        self.row[0] = pn.Card(self.al_tabs, collapsible=False)
+        body = self.al_tabs
+        self.row[0] = pn.Column(body)
         return self.row

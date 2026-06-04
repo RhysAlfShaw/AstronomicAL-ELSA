@@ -1,9 +1,8 @@
 from astronomicAL.settings.active_learning import ActiveLearningSettings
 from astronomicAL.settings.data_selection import DataSelection
-from astronomicAL.settings.param_assignment import ParameterAssignment
+from astronomicAL.settings.param_assignment import ParameterAssignment_ML, ParameterAssignment_Exploring
 from functools import partial
 
-import astronomicAL.config as config
 import panel as pn
 
 
@@ -27,10 +26,14 @@ class SettingsDashboard:
         A pipeline of stages for the user to assign key parameters.
     """
 
-    def __init__(self, main, src):
-        self.row = pn.Row(pn.pane.Str("loading"))
+    def __init__(self, main, src, context=None):
+        self.row = pn.Row(pn.pane.Str("loading"), sizing_mode = "stretch_both")
 
         self.src = src
+
+        self.context = context
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
 
         self.df = None
 
@@ -50,48 +53,104 @@ class SettingsDashboard:
             partial(self._close_settings_cb, main=main)
         )
 
-        self.select_AL_mode_button = pn.widgets.Button(name="Active Learning Mode")
+        self.select_AL_mode_button = pn.widgets.Button(name="Active Learning Mode", sizing_mode = "stretch_width", max_width =150,
+                                                       align="center")
 
         self.select_AL_mode_button.on_click(
             partial(self._create_pipeline_cb, mode="AL", main=main)
         )
 
-        self.select_labelling_mode_button = pn.widgets.Button(name="Labelling Mode")
+        self.select_labelling_mode_button = pn.widgets.Button(name="Labelling Mode", sizing_mode = "stretch_width", max_width =150,
+                                                              align="center")
 
         self.select_labelling_mode_button.on_click(
             partial(self._create_pipeline_cb, mode="Labelling", main=main)
         )
 
+        self.select_exploring_mode_button = pn.widgets.Button(name="Exploring Mode", sizing_mode = "stretch_width", max_width =150,
+                                                              align="center")
+
+        self.select_exploring_mode_button.on_click(
+            partial(self._create_pipeline_cb, mode="Exploring", main=main)
+        )
+
+    def get_toolbar(self):
+        return pn.Spacer(height=1)
+
     def _create_pipeline_cb(self, event, mode, main):
         main.mode = mode
-        config.mode = mode
+        self.config.mode = mode
         self.create_pipeline(mode=mode)
 
     def create_mode_selection_menu(self):
-        layout = pn.Card(
-            pn.Row(
-                pn.Column(
-                    pn.pane.PNG(
-                        "images/classification.png",
-                        width=250,
-                        height=250,
-                        margin=(0, 0, 0, 50),
-                    ),
-                    pn.Row(self.select_labelling_mode_button, max_height=30),
-                ),
-                pn.Column(
-                    pn.pane.PNG(
-                        "images/cluster.png",
-                        width=250,
-                        height=250,
-                        margin=(0, 0, 0, 50),
-                    ),
-                    pn.Row(self.select_AL_mode_button, max_height=30),
-                ),
-            )
+        return pn.FlexBox(
+            self._make_mode_column("images/classification.png", self.select_labelling_mode_button),
+            self._make_mode_column("images/cluster.png", self.select_AL_mode_button),
+            self._make_mode_column("images/exploration.png", self.select_exploring_mode_button),
+            flex_direction="row",
+            flex_wrap="wrap",
+            justify_content="center",
+            align_items="flex-start",
+            gap="24px",
+            sizing_mode="stretch_width",
+            margin=(20, 0, 0, 0),
+        )
+    
+    # def _make_mode_row(self, image_path, button):
+    #     return pn.Row(pn.pane.PNG(
+    #                                image_path,
+    #                                width = 200,
+    #                                height = 200,          
+    #                                margin=(0, 0, 5, 0),
+    #                                ),
+    #                                button,)      
+           
+    def _make_mode_column(self, image_path, button):
+        button.width = 150
+        button.height = 36
+        button.sizing_mode = "fixed"
+        button.margin = (0, 0, 0, 0)
+
+        image = pn.pane.PNG(
+            image_path,
+            width=160,
+            height=160,
+            sizing_mode="fixed",
+            margin=(0, 0, 12, 0),
         )
 
-        return layout
+        image_box = pn.Column(
+            image,
+            width=200,
+            height=200,
+            sizing_mode="fixed",
+            styles={
+                "display": "flex",
+                "justify-content": "center",
+                "align-items": "center",
+            },
+            margin=(0, 0, 0, 0),
+        )
+
+        button_row = pn.Row(
+            pn.layout.HSpacer(),
+            button,
+            pn.layout.HSpacer(),
+            width=220,
+            height=40,
+            sizing_mode="fixed",
+            margin=(0, 0, 0, 0),
+        )
+
+        return pn.Column(
+            image_box,
+            button_row,
+            width=200,
+            height=250,
+            sizing_mode="fixed",
+            margin=(0, 0, 0, 0),
+        )
+
 
     def create_pipeline(self, mode):
         """Create the pipeline of setting stages.
@@ -111,29 +170,40 @@ class SettingsDashboard:
         if mode == "AL":
             self.pipeline.add_stage(
                 "Select Your Data",
-                DataSelection(self.src, mode=mode),
+                DataSelection(self.src, mode=mode, context=self.context),
                 ready_parameter="ready",
             ),
             self.pipeline.add_stage(
-                "Assign Parameters", ParameterAssignment(), ready_parameter="ready"
+                "Assign Parameters", ParameterAssignment_ML(context=self.context), ready_parameter="ready",
             ),
             self.pipeline.add_stage(
-                "Active Learning Settings",
-                ActiveLearningSettings(self._close_settings_button, mode=mode),
+                "Features Settings",
+                ActiveLearningSettings(self._close_settings_button, mode=mode, context=self.context),
             )
         elif mode == "Labelling":
             self.pipeline.add_stage(
                 "Select Your Data",
-                DataSelection(self.src, mode=mode),
+                DataSelection(self.src, mode=mode, context=self.context),
                 ready_parameter="ready",
             ),
             self.pipeline.add_stage(
-                "Assign Parameters", ParameterAssignment(), ready_parameter="ready"
+                "Assign Parameters", ParameterAssignment_ML(context=self.context), ready_parameter="ready"
             ),
             self.pipeline.add_stage(
-                "Active Learning Settings",
-                ActiveLearningSettings(self._close_settings_button, mode=mode),
+                "Features Settings",
+                ActiveLearningSettings(self._close_settings_button, mode=mode, context=self.context),
             )
+
+        elif mode == "Exploring":
+            self.pipeline.add_stage(
+                "Select Your Data",
+                DataSelection(self.src, mode=mode, context=self.context, close_settings_button=self._close_settings_button),
+                # ready_parameter="ready",
+            ),
+            # self.pipeline.add_stage(
+            #     "Assign Parameters", ParameterAssignment_Exploring(self._close_settings_button, context=self.context), 
+            # ),
+
         else:
             valid_mode = False
 
@@ -168,7 +238,6 @@ class SettingsDashboard:
         -------
         updated_settings : dict
             A dictionary of assigned parameters.
-
         """
         updated_settings = {}
         updated_settings["id_col"] = self.pipeline["Assign Parameters"].get_id_column()
@@ -176,7 +245,7 @@ class SettingsDashboard:
             "Assign Parameters"
         ].get_label_column()
         updated_settings["default_vars"] = self.pipeline[
-            "Active Learning Settings"
+            "Features Settings"
         ].get_default_variables()
         updated_settings["label_colours"] = self.pipeline[
             "Assign Parameters"
@@ -185,11 +254,12 @@ class SettingsDashboard:
         return updated_settings
 
     def _close_settings_cb(self, event, main):
+        
         print("closing settings")
 
-        self.df = self.pipeline["Active Learning Settings"].get_df()
-
-        config.main_df = self.df
+        stage_name =  list(self.pipeline._stages.keys())[self._pipeline_stage]
+        self.df = self.pipeline[stage_name].get_df()
+        self.config.main_df = self.df
 
         src = {}
         for col in self.df.columns:
@@ -198,12 +268,14 @@ class SettingsDashboard:
         self.src.data = src
 
         self._close_settings_button.disabled = True
-        self._close_settings_button.name = "Setting up training panels..."
+        self._close_settings_button.name = "Setting up panels..."
 
-        if config.mode == "AL":
+        if self.config.mode == "AL":
             main.set_contents(updated="Active Learning")
-        elif config.mode == "Labelling":
+        elif self.config.mode == "Labelling":
             main.set_contents(updated="Labelling")
+        elif self.config.mode == "Exploring":
+            main.set_contents(updated="Exploring")
 
     def _stage_previous_cb(self, event):
 
@@ -213,58 +285,76 @@ class SettingsDashboard:
     def _stage_next_cb(self, event):
 
         if self.df is None:
-            self.df = config.main_df
+            self.df = self.config.main_df
 
         pipeline_list = list(self.pipeline._stages)
 
         next_stage = pipeline_list[self._pipeline_stage + 1]
+
         self.pipeline[next_stage].update_data(dataframe=self.df)
 
         self._pipeline_stage += 1
         self.panel()
 
     def panel(self):
-        """Render the current view.
-
-        Returns
-        -------
-        row : Panel Row
-            The panel is housed in a row which can then be rendered by the
-            parent Dashboard.
-
-        """
+        """Render the current view."""
 
         if not self.pipeline_initialised:
             self.row[0] = self.create_mode_selection_menu()
             return self.row
 
-        else:
-
-            if self.pipeline["Active Learning Settings"].is_complete():
+        if "Features Settings" in self.pipeline._stages:
+            if self.pipeline["Features Settings"].is_complete():
                 self._close_settings_button.disabled = False
 
-            self.row[0] = pn.Card(
-                pn.Column(
-                    pn.Row(self.pipeline.stage),
-                    pn.Row(
-                        pn.layout.HSpacer(),
-                        pn.layout.HSpacer(),
-                        self.pipeline.buttons[1],
-                        max_height=50,
-                        # max_width=500,
-                    ),
-                ),
-                header=pn.Row(
-                    pn.widgets.StaticText(
-                        name="Settings Panel",
-                        value="Please choose the appropriate settings for your data",
-                    ),
-                    pn.pane.Markdown(
-                        "### " + list(self.pipeline._stages)[self._pipeline_stage],
-                    ),
-                    self._close_settings_button,
-                ),
-                collapsible=False,
-            )
+        current_stage_title = list(self.pipeline._stages)[self._pipeline_stage]
 
-            return self.row
+        self._close_settings_button.width = 150
+        self._close_settings_button.height = 44
+        self._close_settings_button.min_height = 44
+
+        close_row = pn.Row(
+            pn.layout.HSpacer(),
+            self._close_settings_button,
+            sizing_mode="stretch_width",
+            margin=(6, 12, 0, 12),
+        )
+
+        settings_text = pn.pane.Markdown(
+            "**Settings panel:** Choose the appropriate settings for your data",
+            sizing_mode="stretch_width",
+            styles={
+                "font-size": "14px",
+                "color": "#5E6C84",
+            },
+            margin=(2, 12, 4, 12),
+        )
+
+        stage_title = pn.pane.Markdown(
+            f"## {current_stage_title}",
+            sizing_mode="stretch_width",
+            styles={
+                "line-height": "1.2",
+                "color": "#172B4D",
+            },
+            margin=(0, 12, 8, 12),
+        )
+
+        stage_body = pn.Column(
+            self.pipeline.stage,
+            sizing_mode="stretch_width",
+            margin=(0, 12, 16, 12),
+        )
+
+        self.row[0] = pn.Column(
+            close_row,
+            settings_text,
+            stage_title,
+            stage_body,
+            sizing_mode="stretch_both",
+            styles={
+                "background": "#F7F8FA",
+            },
+        )
+
+        return self.row

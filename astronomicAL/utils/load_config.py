@@ -1,312 +1,530 @@
-import astronomicAL.config as config
-from astronomicAL.dashboard.dashboard import Dashboard
-from astronomicAL.extensions.extension_plots import get_plot_dict
-from astronomicAL.extensions.feature_generation import get_oper_dict
-from astronomicAL.extensions.models import get_classifiers
-from astronomicAL.extensions.query_strategies import get_strategy_dict
-from astronomicAL.settings.data_selection import DataSelection
-from astropy.table import Table
+from __future__ import annotations
+
 import json
 import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import panel as pn
+
+from astronomicAL.config import get_save_layout_button
+from astronomicAL.dashboard.dashboard import Dashboard
+from astronomicAL.extensions.dynamic_react_layout import DynamicReactGrid
+from astronomicAL.platform.dataset_header import DatasetHeaderController
+from astronomicAL.platform.mapping_header import MappingAlertController
+from astronomicAL.platform.modal_utils import ensure_template_modal_host
 
 
-def verify_import_config(curr_config_file):
-
-    has_error = False
-    error_message = ""
-
-    if (config.settings["config_load_level"] > 2) or (
-        config.settings["config_load_level"] < 0
-    ):
-        has_error = True
-        error_message += f"**Unable to import file due to the following errors:**\n\n\n\nconfig_load_level = {config.settings['config_load_level']} **[config_load_level should be 0,1 or 2]**\n"
-
-        return has_error, error_message
-
-    if config.settings["config_load_level"] > 0:
-
-        columns_needed = [
-            "dataset_filepath",
-            "optimise_data",
-            "layout",
-            "id_col",
-            "label_col",
-            "default_vars",
-            "labels",
-            "label_colours",
-            "labels_to_strings",
-            "strings_to_labels",
-            "extra_info_cols",
-            "extra_image_cols",
-            "labels_to_train",
-            "features_for_training",
-            "exclude_labels",
-            "exclude_unknown_labels",
-            "unclassified_labels",
-            "scale_data",
-            "feature_generation",
-            "test_set_file",
-        ]
-
-        missing_settings = list(
-            set(columns_needed).difference(list(curr_config_file.keys()))
-        )
-
-        if len(missing_settings) > 0:
-            has_error = True
-            error_message += f"**Unable to import file due to the following errors:**\n\n\n\nThe config file is missing these settings: \n\n{missing_settings} \n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `{config.layout_file}`, to include the missing settings]**\n\n\n"
-            return has_error, error_message
-
-        if "classifiers" not in list(curr_config_file.keys()):
-            if config.settings["config_load_level"] == 2:
-                config.settings["config_load_level"] = 1
-                print(
-                    "\n Switching to load level 1 as classifier data missing from imported config file\n"
-                )
-
-        update_config_settings(curr_config_file)
-        filename = config.settings["dataset_filepath"]
-
-        if not os.path.exists(filename):
-            has_error = True
-            error_message += f"**Unable to import file due to the following errors:**\n\n\n\nFile: {filename} does not exist. **[Check you have downloaded the correct dataset, with the correct name and placed it in your `data/` directory (symlinks are accepted)]**\n"
-
-            return has_error, error_message
-
-        try:
-            ext = filename[filename.rindex(".") + 1 :]
-        except:
-            has_error = True
-            error_message += f"**Unable to import file due to the following errors:**\n\n\n\nFile: `{filename}` has no extension. **[Extensions are required to load the data properly]**\n"
-
-            return has_error, error_message
-        try:
-            table = Table.read(
-                filename,
-                format=f"{ext}",
-            )
-        except:
-            has_error = True
-            error_message += f"**Unable to import file due to the following errors:**\n\n\n\nExtension: {ext} is not a filetype that can be imported. **[See astropy documentation to see acceptable filetypes]**\n"
-
-            return has_error, error_message
-
-        columns_used = []
-
-        for setting in [
-            "id_col",
-            "label_col",
-            "features_for_training",
-            "extra_info_cols",
-            "extra_image_cols",
-        ]:
-            if type(config.settings[setting]) is str:
-                columns_used.append(config.settings[setting])
-
-            elif type(config.settings[setting]) is list:
-                for col in config.settings[setting]:
-                    columns_used.append(col)
-
-        missing_cols = []
-        for col in columns_used:
-            if col not in table.colnames:
-                missing_cols.append(col)
-
-        if len(missing_cols) > 0:
-            has_error = True
-            error_message += f"The dataset is missing these columns:\n\n{missing_cols}\n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `{filename}`, replacing the missing columns]**\n\n\n"
-            error_message += "\n\n-------------------------------\n\n"
-        if "feature_generation" not in missing_settings:
-            opers = list(get_oper_dict().keys())
-            missing_opers = []
-            for oper in config.settings["feature_generation"]:
-                if oper[0] not in opers:
-                    missing_opers.append(oper[0])
-            if len(missing_opers) > 0:
-                has_error = True
-                error_message += f"AstronomicAL is missing the following operations in `extensions/feature_generation.py`:\n\n{missing_opers}\n\n **[If they have not been uploaded to the astronomicAL repo you may need to contact the researcher who uploaded the config for the correct code]**\n\n\n"
-                error_message += "\n\n-------------------------------\n\n"
-        if "layout" in list(curr_config_file.keys()):
-            plots = list(get_plot_dict().keys())
-            contents = [
-                "Settings",
-                "Menu",
-                "Active Learning",
-                "Basic Plot",
-                "Labelling",
-                "Selected Source Info",
-            ] + plots
-
-            missing_contents = []
-
-            for i in curr_config_file["layout"]:
-                if "contents" in curr_config_file["layout"][i]:
-                    if curr_config_file["layout"][i]["contents"] not in contents:
-                        missing_contents.append(
-                            curr_config_file["layout"][i]["contents"]
-                        )
-
-            if len(missing_contents) > 0:
-                has_error = True
-                error_message += f"AstronomicAL is missing the following plots in `extensions/extension_plots.py`:\n\n{missing_contents}\n\n **[If they have not been uploaded to the astronomicAL repo you may need to contact the researcher who uploaded the config for the correct code]**\n\n\n"
-                error_message += "\n\n-------------------------------\n\n"
-        if "classifiers" in list(curr_config_file.keys()):
-            clfs = list(get_classifiers().keys())
-
-            missing_clfs = []
-
-            for i in curr_config_file["classifiers"]:
-                if "classifier" in curr_config_file["classifiers"][i]:
-                    for clf in curr_config_file["classifiers"][i]["classifier"]:
-                        if clf not in clfs:
-                            missing_clfs.append(clf)
-
-            if len(missing_clfs) > 0:
-                has_error = True
-                error_message += f"AstronomicAL is missing the following classifiers in `extensions/models.py`:\n\n{missing_clfs}\n\n **[If they have not been uploaded to the astronomicAL repo you may need to contact the researcher who uploaded the config for the correct code]**\n\n\n"
-                error_message += "\n\n-------------------------------\n\n"
-
-        if "classifiers" in list(curr_config_file.keys()):
-            qrys = list(get_strategy_dict().keys())
-
-            missing_qrys = []
-
-            for i in curr_config_file["classifiers"]:
-                if "query" in curr_config_file["classifiers"][i]:
-                    for qry in curr_config_file["classifiers"][i]["query"]:
-                        if qry not in qrys:
-                            missing_qrys.append(qry)
-
-            if len(missing_qrys) > 0:
-                has_error = True
-                error_message += f"AstronomicAL is missing the following classifiers in `extensions/query_strategies.py`:\n\n{missing_qrys}\n\n **[If they have not been uploaded to the astronomicAL repo you may need to contact the researcher who uploaded the config for the correct code]**\n\n\n"
-                error_message += "\n\n-------------------------------\n\n"
-
-        if "test_set_file" in list(curr_config_file.keys()):
-            if curr_config_file["test_set_file"]:
-                if not os.path.isfile("data/test_set.json"):
-                    has_error = True
-                    error_message += f"AstronomicAL is missing the following test set file:\n\n `data/test_set.json` \n\n **[Your configuration file states it uses this file to create a verified test set. Change flag `test_file_set` to `false` in your config file to create a test set from the data (Classifier performance may be affected from previously stated results)]**\n\n\n"
-                    error_message += "\n\n-------------------------------\n\n"
-    if has_error:
-        error_message = (
-            "**Unable to import file due to the following errors:**\n\n\n\n"
-            + error_message
-        )
-
-    return has_error, error_message
+DEFAULT_BREAKPOINTS = {"lg": 1500, "md": 1050, "sm": 0}
+DEFAULT_COLS_BY_BREAKPOINT = {"lg": 12, "md": 12, "sm": 12}
+DEFAULT_RESIZE_HANDLES = ["s", "w", "e", "n", "sw", "nw", "se"]
 
 
-def update_config_settings(imported_config):
+def _publish(context: Any, topic: str, payload: dict[str, Any]) -> None:
+    events = getattr(context, "events", None)
+    if events is None:
+        return
 
-    ignore_keys = ["Author", "doi", "layout"]
-    for key in imported_config.keys():
-        if key in ignore_keys:
-            continue
-        elif key == "label_colours":
-            label_colours = {}
-            for i in imported_config["label_colours"]:
-                label_colours[int(i)] = imported_config["label_colours"][i]
-            config.settings[key] = label_colours
-        else:
-            config.settings[key] = imported_config[key]
-
-    config.settings["confirmed"] = True
+    try:
+        events.publish(topic, payload)
+    except Exception:
+        pass
 
 
-def create_layout_from_file(react):
+def create_layout_skeleton(
+    react: pn.template.ReactTemplate,
+    *,
+    return_grid: bool = False,
+):
+    """
+    Create and attach the empty DynamicReactGrid.
 
-    with open(config.layout_file) as layout_file:
-        curr_config_file = json.load(layout_file)
+    main.py calls this before AppContext exists so the WorkspaceManager can be
+    constructed with a real grid object.
+    """
+    grid = DynamicReactGrid(
+        keys=[],
+        objects=[],
+        layouts={},
+        sizing_mode="stretch_both",
+        height=900,
+        breakpoints=dict(DEFAULT_BREAKPOINTS),
+        cols_by_breakpoint=dict(DEFAULT_COLS_BY_BREAKPOINT),
+        resize_handles=list(DEFAULT_RESIZE_HANDLES),
+        compact_type="vertical",
+    )
 
-    if len(curr_config_file.keys()) > 1:
+    react._dynamic_grid = grid
+    react.main[:12, :12] = grid
 
-        if config.settings["config_load_level"] > 0:
-
-            update_config_settings(curr_config_file)
-            load_data = DataSelection(config.source, mode=config.mode)
-            config.main_df = load_data.get_dataframe_from_fits_file(
-                curr_config_file["dataset_filepath"],
-                optimise_data=curr_config_file["optimise_data"],
-            )
-
-            src = {}
-            for col in config.main_df:
-                src[f"{col}"] = []
-
-            config.source.data = src
-
-    curr_layout = curr_config_file["layout"]
-
-    for p in curr_layout:
-        start_row = curr_layout[p]["y"]
-        end_row = curr_layout[p]["y"] + curr_layout[p]["h"]
-        start_col = curr_layout[p]["x"]
-        end_col = curr_layout[p]["x"] + curr_layout[p]["w"]
-
-        if "contents" in curr_layout[p].keys():
-            contents = curr_layout[p]["contents"]
-        else:
-            contents = "Menu"
-
-        if int(p) == 0:
-            if (contents == "Menu") or (config.settings["config_load_level"] == 0):
-                contents = "Settings"
-            elif config.mode == "Labelling":
-                contents = "Labelling"
-            elif config.mode == "AL":
-                contents = "Active Learning"
-            main_plot = Dashboard(src=config.source, contents=contents)
-            config.dashboards[p] = main_plot
-            react.main[start_row:end_row, start_col:end_col] = main_plot.panel()
-        else:
-            if "config_load_level" in list(config.settings.keys()):
-                if config.settings["config_load_level"] == 0:
-                    contents = "Menu"
-            new_plot = Dashboard(src=config.source, contents=contents)
-            config.dashboards[p] = new_plot
-            if contents == "Basic Plot":
-
-                x_axis = curr_layout[p]["panel_contents"][0]
-                y_axis = curr_layout[p]["panel_contents"][1]
-
-                if x_axis in list(config.source.data.keys()):
-
-                    new_plot.panel_contents.X_variable = curr_layout[p][
-                        "panel_contents"
-                    ][0]
-                if y_axis in list(config.source.data.keys()):
-                    new_plot.panel_contents.Y_variable = curr_layout[p][
-                        "panel_contents"
-                    ][1]
-            react.main[start_row:end_row, start_col:end_col] = new_plot.panel()
+    if return_grid:
+        return react, grid
 
     return react
 
 
-def create_default_layout(react):
+def create_header(
+    react: pn.template.ReactTemplate,
+    grid: DynamicReactGrid,
+    context: Any,
+):
+    """
+    Build the app header.
 
-    print(
-        "No Layout File Found. Reverting to default found in astronomicAL/utils/save_config.py"
+    The save button now calls context.persistence through save_config.save_workspace.
+    """
+    if context is None:
+        raise ValueError("create_header requires context.")
+
+    config = getattr(context, "config", None)
+    if config is None:
+        raise ValueError("create_header requires context.config.")
+
+    if not hasattr(react, "_header_box"):
+        react._header_box = pn.Row(sizing_mode="stretch_width")
+        react.header.append(react._header_box)
+
+    react.config.raw_css.append(
+        """
+        #pn-Modal {
+            background: transparent !important;
+        }
+
+        #pn-Modal .pn-modal-content {
+            background: transparent !important;
+            box-shadow: none !important;
+            border: none !important;
+            padding: 0 !important;
+            width: auto !important;
+            max-width: none !important;
+            overflow: visible !important;
+            display: flex !important;
+            justify-content: center !important;
+            align-items: flex-start !important;
+        }
+
+        #pn-Modal .pn-modalclose {
+            display: none !important;
+        }
+        """
     )
 
-    main_plot = Dashboard(src=config.source, contents="Settings")
-    config.dashboards[0] = main_plot
-    react.main[:5, :6] = main_plot.panel()
+    ensure_template_modal_host(react)
 
-    num = 0
-    for i in [6]:
-        new_plot = Dashboard(src=config.source)
-        config.dashboards[f"{num}"] = new_plot
+    dataset_header = DatasetHeaderController(context=context, template=react)
+    mapping_alert = MappingAlertController(context=context, template=react)
 
-        react.main[:5, 6:] = new_plot.panel()
-        num += 1
+    react._dataset_header = dataset_header
+    react._mapping_alert = mapping_alert
 
-    for i in [0, 4, 8]:
-        new_plot = Dashboard(src=config.source)
-        config.dashboards[f"{num}"] = new_plot
+    save_button = get_save_layout_button(
+        enable_button=True,
+        from_main=True,
+        context=context,
+    )
 
-        react.main[5:9, i : i + 4] = new_plot.panel()
-        num += 1
+    add_menu_btn = pn.widgets.Button(
+        name="+",
+        button_type="default",
+        width=38,
+        height=34,
+    )
+    add_menu_btn.styles = {
+        "font-size": "26px",
+        "font-weight": "700",
+        "line-height": "1",
+        "padding": "0",
+    }
+    add_menu_btn.css_classes = ["al-add-menu-btn"]
+    add_menu_btn.description = "Add Panel"
+
+    def _on_add_menu(_event) -> None:
+        try:
+            add_menu_panel(grid, context=context)
+        except Exception as exc:
+            import traceback
+
+            print("[add_menu_panel] ERROR:", exc)
+            traceback.print_exc()
+
+    add_menu_btn.on_click(_on_add_menu)
+
+    export_fits_file_button = _build_export_labelled_data_button(context)
+
+    header_row = pn.Row(
+        save_button,
+        dataset_header.view,
+        mapping_alert.view,
+        add_menu_btn,
+        # export_fits_file_button,
+        sizing_mode="stretch_width",
+    )
+
+    react._header_box[:] = [header_row]
+    return react
+
+
+def _build_export_labelled_data_button(context: Any):
+    """
+    Kept as a helper so it can be re-enabled in create_header if needed.
+    """
+    button = pn.widgets.Button(name="Export Labelled Data to Fits File")
+
+    def export_fits_file_cb(_event) -> None:
+        config = context.config
+        settings = getattr(config, "settings", {}) or {}
+
+        list_ids: list[str] = []
+        list_labels: list[str] = []
+
+        if settings.get("confirmed"):
+            classifiers = settings.get("classifiers") or {}
+            for _label, entry in classifiers.items():
+                if isinstance(entry, dict) and ("id" in entry) and ("y" in entry):
+                    list_ids.extend(entry["id"])
+                    list_labels.extend(entry["y"])
+
+            test_set_file = settings.get("test_set_file")
+            if test_set_file and os.path.exists("data/test_set.json"):
+                with open("data/test_set.json", "r", encoding="utf-8") as handle:
+                    orig_labelled_data = json.load(handle)
+
+                for source_id, label in orig_labelled_data.items():
+                    list_ids.append(source_id)
+                    list_labels.append(label)
+
+        if not list_ids:
+            button.disabled = True
+            button.name = "No Labelled Data Found"
+            button.disabled = False
+            button.name = "Export Labelled Data to Fits File"
+            return
+
+        exported_labels = pd.DataFrame(
+            {"id": list_ids, "label": list_labels},
+            dtype="string",
+        )
+
+        from astronomicAL.utils.save_config import save_dataframe_to_fits
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = f"data/labelled_data_{timestamp}.fits"
+
+        save_dataframe_to_fits(exported_labels, path)
+
+        button.disabled = True
+        button.name = f"{len(list_ids)} labelled sources saved to '{path}'"
+        button.disabled = False
+        button.name = "Export Labelled Data to Fits File"
+
+    button.on_click(export_fits_file_cb)
+    return button
+
+
+def bind_controller(view: Any, controller: Any):
+    """
+    Attach a controller to a Panel view.
+
+    WorkspaceManager already tracks controllers explicitly, but this is useful
+    for panels that are created by older dashboard code while you are migrating.
+    """
+    if view is None or controller is None:
+        return view
+
+    try:
+        setattr(view, "_al_controller", controller)
+        if hasattr(controller, "dispose"):
+            setattr(view, "dispose", controller.dispose)
+    except Exception:
+        pass
+
+    return view
+
+
+def _overlaps(a: dict[str, int], b: dict[str, int]) -> bool:
+    return not (
+        a["x"] + a["w"] <= b["x"]
+        or b["x"] + b["w"] <= a["x"]
+        or a["y"] + a["h"] <= b["y"]
+        or b["y"] + b["h"] <= a["y"]
+    )
+
+
+def _find_first_fit(
+    layout_items: list[dict[str, Any]],
+    *,
+    cols: int,
+    w: int,
+    h: int,
+) -> tuple[int, int]:
+    items = [
+        {
+            "x": int(item.get("x", 0)),
+            "y": int(item.get("y", 0)),
+            "w": int(item.get("w", 1)),
+            "h": int(item.get("h", 1)),
+        }
+        for item in (layout_items or [])
+        if item is not None
+    ]
+
+    max_y = 0
+    for item in items:
+        max_y = max(max_y, item["y"] + item["h"])
+
+    for y in range(0, max_y + 100):
+        for x in range(0, cols - w + 1):
+            candidate = {"x": x, "y": y, "w": w, "h": h}
+            if not any(_overlaps(candidate, item) for item in items):
+                return x, y
+
+    return 0, max_y
+
+
+def _menu_geometry_for_breakpoint(breakpoint: str) -> tuple[int, int]:
+    if breakpoint == "lg":
+        return 4, 6
+
+    if breakpoint == "md":
+        return 6, 6
+
+    return 12, 6
+
+
+def _next_platform_panel_id(context: Any, prefix: str = "platform") -> str:
+    settings = getattr(context.config, "settings", None)
+    if settings is None:
+        context.config.settings = {}
+        settings = context.config.settings
+
+    counter_key = "_panel_id_counter"
+    current = int(settings.get(counter_key, 0))
+
+    live_keys = [
+        str(key)
+        for key in (getattr(context.workspace.grid, "keys", None) or [])
+    ]
+
+    numeric_suffixes = []
+    for key in live_keys:
+        if key.startswith(f"{prefix}:"):
+            try:
+                numeric_suffixes.append(int(key.split(":", 1)[1]))
+            except Exception:
+                pass
+
+    if numeric_suffixes:
+        current = max(current, max(numeric_suffixes))
+
+    current += 1
+    settings[counter_key] = current
+
+    return f"{prefix}:{current}"
+
+
+def _layout_items_for_new_tile(
+    grid: DynamicReactGrid,
+    *,
+    default_w_by_breakpoint: dict[str, int],
+    default_h_by_breakpoint: dict[str, int],
+) -> dict[str, dict[str, Any]]:
+    layouts = dict(grid.layouts or {})
+    cols_by_breakpoint = dict(grid.cols_by_breakpoint or DEFAULT_COLS_BY_BREAKPOINT)
+
+    breakpoints = list(cols_by_breakpoint.keys()) or ["lg", "md", "sm"]
+    layout_items: dict[str, dict[str, Any]] = {}
+
+    for breakpoint in breakpoints:
+        cols = int(cols_by_breakpoint.get(breakpoint, 12))
+        w = int(default_w_by_breakpoint.get(breakpoint, 12))
+        h = int(default_h_by_breakpoint.get(breakpoint, 6))
+
+        w = max(1, min(w, cols))
+
+        existing = list(layouts.get(breakpoint, []))
+        x, y = _find_first_fit(existing, cols=cols, w=w, h=h)
+
+        layout_items[breakpoint] = {
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h,
+        }
+
+    return layout_items
+
+
+def add_menu_panel(
+    grid: DynamicReactGrid | None = None,
+    context: Any | None = None,
+) -> str:
+    """
+    Add the current Menu dashboard as a non-persistent platform panel.
+
+    Once the menu itself is moved into a plugin, this function can simply call
+    context.plugins.open_panel("core.menu.panel", ...).
+    """
+    if context is None:
+        raise ValueError("add_menu_panel requires context.")
+
+    if getattr(context, "workspace", None) is None:
+        raise ValueError("add_menu_panel requires context.workspace.")
+
+    if getattr(context, "config", None) is None:
+        raise ValueError("add_menu_panel requires context.config.")
+
+    grid = context.workspace.grid
+
+    panel_id = _next_platform_panel_id(context, prefix="menu")
+    dashboard = Dashboard(
+        src=context.config.source,
+        contents="Menu",
+        context=context,
+    )
+
+    # Important: MenuDashboard receives this Dashboard as self.main.
+    # It needs to know which workspace tile it lives in so selecting a plugin
+    # panel can replace this tile rather than append a new one.
+    dashboard._al_panel_id = panel_id
+    dashboard._al_kind = "platform_panel"
+    dashboard._al_registration_id = "platform.menu"
+    dashboard._al_persistent = False
+
+    try:
+        view = dashboard.panel(in_grid=True)
+    except TypeError:
+        view = dashboard.panel()
+
+    view = bind_controller(view, dashboard)
+
+    layout_items = _layout_items_for_new_tile(
+        grid,
+        default_w_by_breakpoint={"lg": 4, "md": 6, "sm": 12},
+        default_h_by_breakpoint={"lg": 6, "md": 6, "sm": 6},
+    )
+
+    context.workspace.add_panel(
+        panel_id,
+        view,
+        title="Menu",
+        controller=dashboard,
+        layout_items=layout_items,
+        kind="platform_panel",
+        plugin_id=None,
+        registration_id="platform.menu",
+        persistent=False,
+        metadata={"description": "Temporary add-panel menu."},
+    )
+
+    return panel_id
+
+
+def create_layout_from_file(
+    react: pn.template.ReactTemplate,
+    context: Any = None,
+    *,
+    return_grid: bool = False,
+):
+    """
+    Load a new-system workspace JSON file through context.persistence.
+
+    This intentionally does not load old AstronomicAL config files.
+    """
+    if context is None:
+        raise ValueError("create_layout_from_file requires context.")
+
+    if getattr(context, "persistence", None) is None:
+        raise RuntimeError("context.persistence is not configured.")
+
+    config = getattr(context, "config", None)
+    if config is None:
+        raise ValueError("create_layout_from_file requires context.config.")
+
+    layout_file = getattr(config, "layout_file", None)
+    if not layout_file:
+        raise ValueError("context.config.layout_file is not set.")
+
+    grid = getattr(react, "_dynamic_grid", None)
+
+    if grid is None:
+        react, grid = create_layout_skeleton(react, return_grid=True)
+
+    context.workspace.react = react
+    context.workspace.grid = grid
+
+    layout_path = Path(layout_file).expanduser()
+
+    if not layout_path.exists():
+        raise FileNotFoundError(f"Workspace file does not exist: {layout_path}")
+
+    snapshot = context.persistence.load(layout_path)
+    issues = context.persistence.restore(snapshot, strict=False)
+
+    if len(context.workspace.list_panels()) == 0:
+        print(
+            "[create_layout_from_file] Restored workspace contains no panels; "
+            "adding temporary Menu panel."
+        )
+        try:
+            add_menu_panel(context.workspace.grid, context=context)
+        except Exception as exc:
+            print("[create_layout_from_file] Could not add fallback Menu panel:", exc)
+
+    react = create_header(react, context.workspace.grid, context=context)
+
+    _publish(
+        context,
+        "workspace.loaded",
+        {
+            "path": str(layout_path),
+            "issues": issues,
+        },
+    )
+
+    if return_grid:
+        return react, context.workspace.grid
+
+    return react
+
+
+def create_default_layout(
+    react: pn.template.ReactTemplate,
+    context: Any = None,
+    *,
+    return_grid: bool = False,
+):
+    """
+    Create a default empty plugin workspace.
+
+    The header plus button is enough to add panels. A temporary Menu panel is
+    also opened so the workspace is discoverable on first launch.
+    """
+    if context is None:
+        raise ValueError("create_default_layout requires context.")
+
+    react, grid = create_layout_skeleton(react, return_grid=True)
+
+    context.workspace.react = react
+    context.workspace.grid = grid
+
+    react = create_header(react, grid, context=context)
+
+    try:
+        add_menu_panel(grid, context=context)
+    except Exception as exc:
+        print("[create_default_layout] could not add menu panel:", exc)
+
+    _publish(
+        context,
+        "workspace.default.created",
+        {
+            "panel_count": len(context.workspace.list_panels()),
+        },
+    )
+
+    if return_grid:
+        return react, grid
 
     return react
