@@ -56,7 +56,14 @@ manifest = PluginManifest(
         "and publishes cutout artifacts for other panels."
     ),
     requires=["astroquery", "astropy", "reproject", "mocpy"],
-    capabilities=["panel", "service", "artifact_viewer", "datasets", "selection", "jobs"],
+    capabilities=[
+        "panel",
+        "service",
+        "artifact_viewer",
+        "datasets",
+        "selection",
+        "jobs",
+    ],
     tags=["astronomy", "euclid", "cutout", "image", "wcs"],
 )
 
@@ -89,7 +96,11 @@ def register(api) -> None:
         tags=["astronomy", "euclid", "cutout", "image", "selection"],
         required_mappings=["record_id", "coords.ra", "coords.dec"],
         uses_services=[f"{PLUGIN_ID}.runtime"],
-        produces=["astro.cutout.euclid", "astro.cutout.updated", "astro.cutout.running"],
+        produces=[
+            "astro.cutout.euclid",
+            "astro.cutout.updated",
+            "astro.cutout.running",
+        ],
         default_layout={"x": 0, "y": 0, "w": 5, "h": 5},
         state_version=1,
         persist_layout=True,

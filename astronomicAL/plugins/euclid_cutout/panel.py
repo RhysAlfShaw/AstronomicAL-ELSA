@@ -16,7 +16,6 @@ except Exception:
 
 from .service import DEFAULT_EUCLID_FILTERS, DEFAULT_SAVE_DIR, EuclidCutoutRuntime
 
-
 PLUGIN_ID = "astro.euclid_cutout"
 RUNTIME_SERVICE_KEY = f"{PLUGIN_ID}.runtime"
 
@@ -63,6 +62,7 @@ def _settings_box(*controls: Any) -> pn.FlexBox:
         },
     )
 
+
 def _fallback_spectrum_colour(index: int) -> str:
     colours = [
         "#e41a1c",
@@ -76,6 +76,7 @@ def _fallback_spectrum_colour(index: int) -> str:
         "#999999",
     ]
     return colours[int(index) % len(colours)]
+
 
 def _small_label(text: str, *, width: int = 76) -> pn.pane.HTML:
     return pn.pane.HTML(
@@ -133,6 +134,8 @@ class EuclidCutoutPanel:
         self.overplotted_coordinates: List[Any] = []
         self.stored_spectrum_coordinates: Dict[str, Dict[str, Iterable[float]]] = {}
 
+        self._druid_contours_data: Dict[str, Any] = {}
+
         self.image_width = 1
         self.image_height = 1
         self.bar_length_pixels = 1
@@ -184,6 +187,7 @@ class EuclidCutoutPanel:
             "auto_reload": self.auto_reload.value,
             "save_dir": self.save_dir_input.value,
             "credentials_filepath": self.credentials_file_input.value,
+            "druid_contours": self.druid_contour_selector.value,  # <--- Added here
         }
 
     def restore_state(self, state: Dict[str, Any]) -> None:
@@ -207,6 +211,7 @@ class EuclidCutoutPanel:
             "auto_reload": self.auto_reload,
             "save_dir": self.save_dir_input,
             "credentials_filepath": self.credentials_file_input,
+            "druid_contours": self.druid_contour_selector,
         }
         for key, widget in mapping.items():
             if key in state:
@@ -395,6 +400,13 @@ class EuclidCutoutPanel:
             margin=(10, 8, 0, 6),
         )
 
+        # New: Druid contour dropdown (hidden by default)
+        self.druid_contour_selector = _style_widget(
+            pn.widgets.Select(name="Druid Contours", options=["None"], value="None"),
+            width=145,
+        )
+        # self.druid_contour_selector.visible = False
+
         # Contour controls.
         self.contour_levels = _style_widget(
             pn.widgets.IntInput(
@@ -526,6 +538,7 @@ class EuclidCutoutPanel:
             self.contour_levels,
             self.contour_base,
             self.contour_exponent,
+            self.druid_contour_selector,
         ]:
             widget.param.watch(lambda _event: self._refresh_display(), "value")
 
@@ -566,6 +579,7 @@ class EuclidCutoutPanel:
             self.show_scale,
             self.show_spectrum_coords,
             self.auto_reload,
+            self.druid_contour_selector,
             self.contour_levels,
             self.contour_base,
             self.contour_exponent,
@@ -589,7 +603,9 @@ class EuclidCutoutPanel:
         self._ensure_settings_built()
         self.settings_pane.visible = self.settings_visible
         try:
-            self.settings_button.button_type = "primary" if self.settings_visible else "default"
+            self.settings_button.button_type = (
+                "primary" if self.settings_visible else "default"
+            )
         except Exception:
             pass
 
@@ -650,6 +666,7 @@ class EuclidCutoutPanel:
         self._subscribe("dataset.active.changed", self._dataset_changed)
         self._subscribe("dataset.mapping_updated", self._dataset_changed)
         self._subscribe("astro.coords.updated", self._coords_updated)
+        self._subscribe("astro.druid.contours.updated", self._druid_contours_updated)
 
     def _subscribe(self, topic: str, callback: Any) -> None:
         events = getattr(self.context, "events", None)
@@ -686,6 +703,11 @@ class EuclidCutoutPanel:
         self.euclid_object = None
         self.stored_spectrum_coordinates.clear()
         self.overplotted_coordinates = []
+
+        self._druid_contours_data.clear()
+        # self.druid_contour_selector.visible = False
+        self.druid_contour_selector.options = ["None"]
+        self.druid_contour_selector.value = "None"
 
         self.figure.object = self._empty_image()
 
@@ -725,7 +747,11 @@ class EuclidCutoutPanel:
         selected_id = payload.get("selected_id")
         current_id = self._current_row_id()
 
-        if selected_id is not None and current_id is not None and str(selected_id) != str(current_id):
+        if (
+            selected_id is not None
+            and current_id is not None
+            and str(selected_id) != str(current_id)
+        ):
             return
 
         coords = None
@@ -769,6 +795,67 @@ class EuclidCutoutPanel:
 
         self.stored_spectrum_coordinates[storage_key] = normalised
         self._refresh_display()
+
+    def _druid_contours_updated(self, topic: str, payload: Any) -> None:
+        if self._current_target is None:
+            return
+
+        # Verify the event applies to the currently focused target
+        dataset_id = payload.get("dataset_id")
+        row_id = payload.get("selected_id") or payload.get("row_id")
+
+        if dataset_id and dataset_id != self._current_target.dataset_id:
+            return
+        if row_id and str(row_id) != str(self._current_target.row_id):
+            return
+
+        self._refresh_druid_contours()
+        self._refresh_display()
+
+    def _refresh_druid_contours(self) -> None:
+        artifacts = getattr(self.context, "artifacts", None)
+        if artifacts is None or self._current_target is None:
+            self.druid_contour_selector.visible = False
+            return
+
+        try:
+            refs = artifacts.find(
+                type="astro.druid.contours.updated",
+                dataset_id=self._current_target.dataset_id,
+            )
+
+            # Filter matches for current row
+            if self._current_target.row_id is not None:
+                refs = [
+                    r
+                    for r in refs
+                    if r.row_ids and self._current_target.row_id in r.row_ids
+                ]
+
+            if not refs:
+                self.druid_contour_selector.visible = False
+                self.druid_contour_selector.options = ["None"]
+                self.druid_contour_selector.value = "None"
+                self._druid_contours_data.clear()
+                return
+
+            options = ["None"]
+            self._druid_contours_data.clear()
+
+            for ref in refs:
+                payload = artifacts.get(ref.artifact_id)
+                if payload:
+                    name = payload.get("name", f"Druid ({ref.artifact_id[:6]})")
+                    options.append(name)
+                    self._druid_contours_data[name] = payload
+
+            self.druid_contour_selector.options = options
+            if self.druid_contour_selector.value not in options:
+                self.druid_contour_selector.value = "None"
+
+            self.druid_contour_selector.visible = True
+        except Exception as exc:
+            print(f"Could not load druid contours: {exc}")
 
     # ------------------------------------------------------------------
     # Data/mapping helpers
@@ -854,7 +941,9 @@ class EuclidCutoutPanel:
         except Exception:
             return []
 
-    def _guess_column(self, dataset_id: str, candidates: Iterable[str]) -> Optional[str]:
+    def _guess_column(
+        self, dataset_id: str, candidates: Iterable[str]
+    ) -> Optional[str]:
         columns = self._columns(dataset_id)
         lower_map = {str(col).lower(): str(col) for col in columns}
 
@@ -919,7 +1008,9 @@ class EuclidCutoutPanel:
             return True
 
         focus_dataset = self._get_from_obj(focus, "dataset_id", "dataset")
-        focus_row_id = self._get_from_obj(focus, "row_id", "record_id", "id", "source_id")
+        focus_row_id = self._get_from_obj(
+            focus, "row_id", "record_id", "id", "source_id"
+        )
 
         if focus_dataset is not None and str(focus_dataset) != str(target.dataset_id):
             return False
@@ -949,7 +1040,9 @@ class EuclidCutoutPanel:
             dataset_id,
             ["ra", "RA", "right_ascension", "alpha", "source_ra"],
         )
-        dec_column = self._mapping(dataset_id, "coords.dec", "dec") or self._guess_column(
+        dec_column = self._mapping(
+            dataset_id, "coords.dec", "dec"
+        ) or self._guess_column(
             dataset_id,
             ["dec", "DEC", "declination", "delta", "source_dec"],
         )
@@ -1013,9 +1106,16 @@ class EuclidCutoutPanel:
             )
 
         if row is None:
-            raise RuntimeError("No focused row is available for the Euclid cutout panel.")
+            raise RuntimeError(
+                "No focused row is available for the Euclid cutout panel."
+            )
 
-        if row_id is None and id_column and id_column != "Use Index" and id_column in row:
+        if (
+            row_id is None
+            and id_column
+            and id_column != "Use Index"
+            and id_column in row
+        ):
             row_id = row.get(id_column)
 
         row_id_str = None if row_id is None else str(row_id)
@@ -1218,10 +1318,22 @@ class EuclidCutoutPanel:
 
             # Older/experimental spellings kept as compatibility fallbacks.
             attempts = [
-                ("get_rows_by_id", {"row_ids": [row_id], "id_column": id_column, "columns": columns}),
-                ("read_rows_by_id", {"row_ids": [row_id], "id_column": id_column, "columns": columns}),
-                ("rows_by_id", {"row_ids": [row_id], "id_column": id_column, "columns": columns}),
-                ("get_rows", {"row_ids": [row_id], "id_column": id_column, "columns": columns}),
+                (
+                    "get_rows_by_id",
+                    {"row_ids": [row_id], "id_column": id_column, "columns": columns},
+                ),
+                (
+                    "read_rows_by_id",
+                    {"row_ids": [row_id], "id_column": id_column, "columns": columns},
+                ),
+                (
+                    "rows_by_id",
+                    {"row_ids": [row_id], "id_column": id_column, "columns": columns},
+                ),
+                (
+                    "get_rows",
+                    {"row_ids": [row_id], "id_column": id_column, "columns": columns},
+                ),
             ]
 
             for name, kwargs in attempts:
@@ -1329,9 +1441,7 @@ class EuclidCutoutPanel:
             self._current_target = target
             self.target_status.object = self._target_html(target)
         except Exception as exc:
-            self.target_status.object = (
-                f"<div style='color:#8a5a00'>⚠️ {exc}</div>"
-            )
+            self.target_status.object = f"<div style='color:#8a5a00'>⚠️ {exc}</div>"
 
     def load_cutout(self, *, reason: str = "manual") -> None:
         if self._disposed:
@@ -1429,7 +1539,9 @@ class EuclidCutoutPanel:
             except Exception:
                 pass
 
-    def _on_cutout_loaded(self, result: Any, *, target: _ResolvedTarget, reason: str) -> None:
+    def _on_cutout_loaded(
+        self, result: Any, *, target: _ResolvedTarget, reason: str
+    ) -> None:
         if self._disposed:
             return
 
@@ -1441,6 +1553,7 @@ class EuclidCutoutPanel:
         self.euclid_object = result.cutout
         self.status.object = ""
 
+        self._refresh_druid_contours()
         self._refresh_display()
         artifact_id = self._put_cutout_artifact(result, target=target)
 
@@ -1470,7 +1583,9 @@ class EuclidCutoutPanel:
             },
         )
 
-    def _on_cutout_error(self, exc: BaseException, *, target: _ResolvedTarget, reason: str) -> None:
+    def _on_cutout_error(
+        self, exc: BaseException, *, target: _ResolvedTarget, reason: str
+    ) -> None:
         if self._disposed:
             return
 
@@ -1494,7 +1609,9 @@ class EuclidCutoutPanel:
             },
         )
 
-    def _put_cutout_artifact(self, result: Any, *, target: _ResolvedTarget) -> Optional[str]:
+    def _put_cutout_artifact(
+        self, result: Any, *, target: _ResolvedTarget
+    ) -> Optional[str]:
         artifacts = getattr(self.context, "artifacts", None)
         if artifacts is None:
             return None
@@ -1650,7 +1767,8 @@ class EuclidCutoutPanel:
                     temp_img = hv.Image(temp_data[::-1, ...], bounds=bounds)
 
                 levels = np.nanmax(temp_data) / (
-                    base ** (np.arange(1, int(self.contour_levels.value) + 1) * exponent)
+                    base
+                    ** (np.arange(1, int(self.contour_levels.value) + 1) * exponent)
                 )
                 contours = hv.operation.contours(temp_img, levels=levels).opts(
                     cmap=["red"],
@@ -1678,7 +1796,38 @@ class EuclidCutoutPanel:
             self.overplotted_coordinates = self._spectrum_coordinate_elements()
             elements.extend(self.overplotted_coordinates)
 
+        if (
+            self.druid_contour_selector.visible
+            and self.druid_contour_selector.value != "None"
+        ):
+            contour_payload = self._druid_contours_data.get(
+                self.druid_contour_selector.value
+            )
+            if contour_payload:
+                elements.extend(
+                    self._druid_contour_elements(contour_payload, filter_name)
+                )
+
         self.euclid_fig = elements
+
+    def _druid_contour_elements(self, payload: Any, filter_name: str) -> List[Any]:
+        elements = []
+        try:
+            contours = payload.get("contours", [])
+            for contour in contours:
+                xs = contour[0]
+                ys = contour[1]
+
+                # Plot the path as a cyan contour outline
+                elements.append(
+                    hv.Path([(xs, ys)]).opts(
+                        color="cyan", line_width=2, tools=["hover"]
+                    )
+                )
+        except Exception as exc:
+            print(f"Error plotting druid contours: {exc}")
+
+        return elements
 
     def _scale_bar_elements(self) -> List[Any]:
         filter_name = self.filter_input.value
@@ -1781,7 +1930,9 @@ class EuclidCutoutPanel:
                     dec_values.append(dec)
                     colours.append(str(colour))
                     labels.append(str(label))
-                    indices.append(int(index) if str(index).isdigit() else fallback_index)
+                    indices.append(
+                        int(index) if str(index).isdigit() else fallback_index
+                    )
 
                 return {
                     "ra": ra_values,
@@ -1841,8 +1992,14 @@ class EuclidCutoutPanel:
         indices = []
 
         for idx in range(n):
-            colour = raw_colours[idx] if idx < len(raw_colours) and raw_colours[idx] else None
-            label = raw_labels[idx] if idx < len(raw_labels) and raw_labels[idx] else None
+            colour = (
+                raw_colours[idx]
+                if idx < len(raw_colours) and raw_colours[idx]
+                else None
+            )
+            label = (
+                raw_labels[idx] if idx < len(raw_labels) and raw_labels[idx] else None
+            )
             index = raw_indices[idx] if idx < len(raw_indices) else idx
 
             colours.append(str(colour or _fallback_spectrum_colour(idx)))
@@ -1887,8 +2044,16 @@ class EuclidCutoutPanel:
                     if not (0 <= x < self.image_width and 0 <= y < self.image_height):
                         continue
 
-                    colour = colours[idx] if idx < len(colours) and colours[idx] else _fallback_spectrum_colour(idx)
-                    label = labels[idx] if idx < len(labels) and labels[idx] else f"{source_name} spectrum {idx + 1}"
+                    colour = (
+                        colours[idx]
+                        if idx < len(colours) and colours[idx]
+                        else _fallback_spectrum_colour(idx)
+                    )
+                    label = (
+                        labels[idx]
+                        if idx < len(labels) and labels[idx]
+                        else f"{source_name} spectrum {idx + 1}"
+                    )
                     spectrum_index = indices[idx] if idx < len(indices) else idx
 
                     elements.append(
@@ -1989,12 +2154,16 @@ def create_euclid_cutout_artifact_viewer(
     try:
         payload = artifacts.get(artifact_id)
     except Exception as exc:
-        view = pn.pane.Markdown(f"Could not load Euclid cutout artifact `{artifact_id}`: {exc}")
+        view = pn.pane.Markdown(
+            f"Could not load Euclid cutout artifact `{artifact_id}`: {exc}"
+        )
         return view, None
 
     image = payload.get("image") if isinstance(payload, dict) else None
     if image is None:
-        view = pn.pane.Markdown(f"Artifact `{artifact_id}` does not contain displayable image data.")
+        view = pn.pane.Markdown(
+            f"Artifact `{artifact_id}` does not contain displayable image data."
+        )
         return view, None
 
     try:
@@ -2027,4 +2196,9 @@ def create_euclid_cutout_artifact_viewer(
 
         return pn.Column(meta, pane, sizing_mode="stretch_both"), None
     except Exception as exc:
-        return pn.pane.Markdown(f"Could not render Euclid cutout artifact `{artifact_id}`: {exc}"), None
+        return (
+            pn.pane.Markdown(
+                f"Could not render Euclid cutout artifact `{artifact_id}`: {exc}"
+            ),
+            None,
+        )

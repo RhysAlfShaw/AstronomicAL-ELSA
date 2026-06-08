@@ -37,6 +37,7 @@ class DruidPanel:
         # State tracking
         self._current_cutout_id = None
         self._current_dataset_id = None
+        self._current_selected_id = None
 
         self._build_widgets()
         self._build_layout()
@@ -113,6 +114,8 @@ class DruidPanel:
     def _on_focus_cleared(self, topic, payload):
         """Reset the panel if the user clears their current selection."""
         self._current_cutout_id = None
+        self._current_dataset_id = None  # <-- ADD THIS
+        self._current_selected_id = None  # <-- ADD THIS
         self.status.object = "Waiting for an active cutout..."
         self.run_button.disabled = True
 
@@ -132,6 +135,8 @@ class DruidPanel:
             self._job_handle = jobs.submit(
                 self._druid_worker,
                 cutout_id=self._current_cutout_id,
+                dataset_id=self._current_dataset_id,  # <-- ADD THIS
+                selected_id=self._current_selected_id,  # <-- ADD THIS
                 threshold=self.threshold_input.value,
                 title="DRUID Source Detection",
                 on_done=self._on_druid_done,
@@ -140,7 +145,9 @@ class DruidPanel:
         else:
             self.status.object = "Error: JobManager is not available."
 
-    def _druid_worker(self, cutout_id, threshold, cancel_token=None):
+    def _druid_worker(
+        self, cutout_id, dataset_id, selected_id, threshold, cancel_token=None
+    ):
         """
         Background worker. Do NOT update UI elements in this function.
         Returns the data payload to be passed to _on_druid_done.
@@ -172,8 +179,9 @@ class DruidPanel:
             contours.append((x[i], y[i]))
 
         return {
-            "dataset_id": self._current_dataset_id,
-            "contours": contours,  # Replace with actual DRUID contours
+            "dataset_id": dataset_id,
+            "selected_id": selected_id,  # <-- Pass the ID to the result
+            "contours": [contours],
             "threshold_used": threshold,
             "source_cutout_id": cutout_id,
         }
@@ -181,8 +189,9 @@ class DruidPanel:
     def _on_druid_done(self, result):
         """Called on the main thread when the background job finishes."""
         self.run_button.disabled = False
-        source_count = len(result["catalog"]["x"])
-        self.status.object = f"**DRUID finished!** Found {source_count} sources."
+        # source_count = len(result["catalog"]["x"])
+        contours = result["contours"]
+        self.status.object = f"**DRUID finished!**"
 
         # Publish the results to the ArtifactStore so other plugins can use it
         artifacts = getattr(self.context, "artifacts", None)
@@ -191,20 +200,22 @@ class DruidPanel:
         if artifacts:
             # Store the extracted catalog
             artifact_id = artifacts.put(
-                type="astro.druid.catalog",
+                type="astro.druid.contours",
                 payload=result,
                 dataset_id=result.get("dataset_id"),
+                row_ids=[result["selected_id"]] if result.get("selected_id") else None,
                 persist=False,
             )
 
             if events and artifact_id:
                 # Announce to the app that DRUID results are available
                 events.publish(
-                    "astro.druid.completed",
+                    "astro.druid.contours.updated",
                     {
                         "artifact_id": artifact_id,
                         "dataset_id": result.get("dataset_id"),
-                        "source_count": source_count,
+                        "selected_id": result.get("selected_id"),
+                        "source_contours": contours,
                     },
                 )
 
